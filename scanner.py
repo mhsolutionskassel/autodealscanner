@@ -597,4 +597,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print("FEHLER:", exc, file=sys.stderr)
         sys.exit(1)
-```
