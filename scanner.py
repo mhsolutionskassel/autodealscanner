@@ -63,7 +63,7 @@ def main():
  if not KEY:raise RuntimeError('KLAZ_API_KEY ist nicht gesetzt. GitHub → Settings → Secrets and variables → Actions → New repository secret.')
  state=read(STATE,{ });loc=state.get('location_id');cat=state.get('category_id');discovery=0
  if not loc:
-    location_response = api('/locations', {'q': 'Kassel', 'limit': 20})
+location_response = api('/locations', {'q': 'Kassel', 'limit': 100})
     discovery += 1
     loc = location_id(location_response)
     if not loc:
