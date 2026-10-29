@@ -7,28 +7,19 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
-# --------------------------------------------------
-# KONFIGURATION: KASSEL FEST HINTERLEGT
-# --------------------------------------------------
-
 BASE = "https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen"
 KEY = os.environ.get("KLAZ_API_KEY", "").strip()
 
-LATITUDE = "51.3127"
-LONGITUDE = "9.4797"
-DISTANCE_KM = "100"
-
+# Kassel fest hinterlegt
+KASSEL_LAT = 51.3127
+KASSEL_LON = 9.4797
+RADIUS_KM = 100
 MIN_PRICE = 100
 MAX_PRICE = 7000
-MIN_TARGET_PROFIT = 800
 
 STATE = "data/state.json"
 OUT = "data/results.json"
 
-
-# --------------------------------------------------
-# DATEIEN
-# --------------------------------------------------
 
 def read(path, default):
     try:
@@ -40,24 +31,17 @@ def read(path, default):
 
 def write(path, obj):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
-# --------------------------------------------------
-# API
-# --------------------------------------------------
-
 def api(path, params=None):
     if not KEY:
         raise RuntimeError(
-            "KLAZ_API_KEY fehlt. "
-            "GitHub > Settings > Secrets and variables > Actions"
+            "KLAZ_API_KEY fehlt. GitHub > Settings > Secrets and variables > Actions."
         )
 
     url = BASE + path
-
     if params:
         url += "?" + urlencode(params)
 
@@ -66,7 +50,7 @@ def api(path, params=None):
         headers={
             "klaz_key": KEY,
             "Accept": "application/json",
-            "User-Agent": "AutoDealScanner/1.0",
+            "User-Agent": "AutoDealScanner/0.2",
         },
     )
 
@@ -75,27 +59,19 @@ def api(path, params=None):
             data = json.loads(response.read().decode("utf-8"))
 
     except HTTPError as e:
-        details = e.read().decode("utf-8", "replace")[:800]
-        raise RuntimeError(
-            f"API-Fehler HTTP {e.code}: {details}"
-        )
+        details = e.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"API-Fehler HTTP {e.code}: {details}")
 
     except URLError as e:
-        raise RuntimeError(
-            f"Verbindung zur API fehlgeschlagen: {e}"
-        )
+        raise RuntimeError(f"API-Verbindung fehlgeschlagen: {e}")
 
     if data.get("success") is False:
         raise RuntimeError(
-            data.get("message", "API-Suche fehlgeschlagen")
+            f"API meldet einen Fehler: {data.get('message', data)}"
         )
 
     return data
 
-
-# --------------------------------------------------
-# FAHRZEUGERKENNUNG
-# --------------------------------------------------
 
 def price_of(ad):
     price = ad.get("price")
@@ -105,20 +81,24 @@ def price_of(ad):
 
     try:
         return float(price)
-    except (ValueError, TypeError):
+    except (TypeError, ValueError):
         return None
 
 
-def carish(ad):
-    text = (
+def text_of(ad):
+    return (
         str(ad.get("title", ""))
         + " "
         + str(ad.get("description", ""))
     ).lower()
 
-    excluded = (
-        "anhänger",
+
+def carish(ad):
+    text = text_of(ad)
+
+    exclude = (
         "autoanhänger",
+        "anhänger",
         "felge",
         "reifen",
         "motoröl",
@@ -126,67 +106,33 @@ def carish(ad):
         "scheinwerfer",
         "getriebeöl",
         "suche auto",
+        "suche einen pkw",
         "nur ersatzteile",
     )
 
     brands = (
-        "volkswagen",
-        "vw ",
-        "golf",
-        "polo",
-        "passat",
-        "opel",
-        "astra",
-        "corsa",
-        "ford",
-        "focus",
-        "fiesta",
-        "bmw",
-        "mercedes",
-        "benz",
-        "audi",
-        "skoda",
-        "seat",
-        "renault",
-        "peugeot",
-        "citroën",
-        "citroen",
-        "dacia",
-        "volvo",
-        "fiat",
-        "toyota",
-        "hyundai",
-        "kia",
-        "mazda",
-        "honda",
-        "nissan",
-        "suzuki",
-        "mitsubishi",
-        "mini",
-        "smart",
-        "gebrauchtwagen",
-        "pkw",
-        "auto ",
+        "volkswagen", "vw ", "golf", "polo", "passat",
+        "opel", "astra", "corsa",
+        "ford", "focus", "fiesta",
+        "bmw", "mercedes", "benz", "audi",
+        "skoda", "seat", "renault", "peugeot",
+        "citroën", "citroen", "dacia", "volvo", "fiat",
+        "toyota", "hyundai", "kia", "mazda", "honda",
+        "nissan", "suzuki", "mitsubishi", "mini",
+        "alfa romeo", "smart", "gebrauchtwagen",
+        "pkw", "auto ",
     )
 
     return (
-        not any(word in text for word in excluded)
-        and any(word in text for word in brands)
+        not any(word in text for word in exclude)
+        and any(brand in text for brand in brands)
     )
 
 
-# --------------------------------------------------
-# REPARATUR- UND RISIKORESERVE
-# --------------------------------------------------
+def repair_reserve(ad, price):
+    text = text_of(ad)
 
-def reserve(ad, price):
-    text = (
-        str(ad.get("title", ""))
-        + " "
-        + str(ad.get("description", ""))
-    ).lower()
-
-    major_defects = (
+    serious = (
         "motorschaden",
         "getriebeschaden",
         "unfallwagen",
@@ -196,7 +142,7 @@ def reserve(ad, price):
         "kupplung defekt",
     )
 
-    minor_defects = (
+    minor = (
         "tüv abgelaufen",
         "tuev abgelaufen",
         "rost",
@@ -206,57 +152,31 @@ def reserve(ad, price):
         "reparatur",
         "defekt",
         "ölverlust",
-        "oelverlust",
     )
 
-    if any(word in text for word in major_defects):
+    if any(word in text for word in serious):
         return max(1500, price * 0.35)
 
-    if any(word in text for word in minor_defects):
+    if any(word in text for word in minor):
         return max(900, price * 0.18)
 
     return max(600, price * 0.10)
 
 
-# --------------------------------------------------
-# VERGLEICHSGRUPPEN
-# --------------------------------------------------
-
-def key_for(title):
+def model_key(title):
     words = re.sub(
         r"[^a-z0-9äöüß ]",
         " ",
-        title.lower(),
+        title.lower()
     ).split()
 
     makes = (
-        "volkswagen",
-        "vw",
-        "opel",
-        "ford",
-        "bmw",
-        "mercedes",
-        "benz",
-        "audi",
-        "skoda",
-        "seat",
-        "renault",
-        "peugeot",
-        "citroen",
-        "citroën",
-        "dacia",
-        "volvo",
-        "fiat",
-        "toyota",
-        "hyundai",
-        "kia",
-        "mazda",
-        "honda",
-        "nissan",
-        "suzuki",
-        "mitsubishi",
-        "mini",
-        "smart",
+        "volkswagen", "vw", "opel", "ford", "bmw",
+        "mercedes", "benz", "audi", "skoda", "seat",
+        "renault", "peugeot", "citroen", "citroën",
+        "dacia", "volvo", "fiat", "toyota", "hyundai",
+        "kia", "mazda", "honda", "nissan", "suzuki",
+        "mitsubishi", "mini", "smart",
     )
 
     for index, word in enumerate(words):
@@ -268,75 +188,84 @@ def key_for(title):
     return " ".join(words[:2])
 
 
-# --------------------------------------------------
-# SUCHE
-# --------------------------------------------------
+def get_ads(response):
+    """
+    Holt Inserate aus dem dokumentierten Antwortformat.
+    """
+    data = response.get("data", {})
+
+    if isinstance(data, dict):
+        ads = data.get("ads", [])
+        if isinstance(ads, list):
+            return ads
+
+    return []
+
 
 def main():
     if not KEY:
         raise RuntimeError(
-            "KLAZ_API_KEY fehlt. "
-            "Bitte GitHub Secrets kontrollieren."
+            "KLAZ_API_KEY ist nicht gesetzt. "
+            "GitHub > Settings > Secrets and variables > Actions."
         )
 
-    print("AutoDealScanner startet.")
+    print("Starte AutoDealScanner.")
     print("Standort: Kassel")
-    print(f"Koordinaten: {LATITUDE}, {LONGITUDE}")
-    print(f"Suchradius: {DISTANCE_KM} km")
-    print(f"Preisbereich: {MIN_PRICE} bis {MAX_PRICE} EUR")
+    print(f"Koordinaten: {KASSEL_LAT}, {KASSEL_LON}")
+    print(f"Suchradius: {RADIUS_KM} km")
+    print(f"Preisrahmen: {MIN_PRICE} bis {MAX_PRICE} Euro")
+    print("Standort-ID wird nicht benötigt.")
 
-    queries = (
-        "Auto",
-        "Gebrauchtwagen",
-        "PKW",
-    )
-
+    state = read(STATE, {})
     unique = {}
     errors = []
 
+    # Ohne category_id suchen, um auch die Kategorie-ID-Ermittlung
+    # als mögliche Fehlerquelle auszuschließen.
+    queries = ("Auto", "Gebrauchtwagen", "PKW")
+
     for query in queries:
-        print(f"Suche läuft: {query}")
+        print(f"Suche: {query}")
 
         params = {
             "q": query,
-            "latitude": LATITUDE,
-            "longitude": LONGITUDE,
-            "distance": DISTANCE_KM,
-            "min_price": str(MIN_PRICE),
-            "max_price": str(MAX_PRICE),
-            "page": "0",
-            "size": "100",
+            "latitude": KASSEL_LAT,
+            "longitude": KASSEL_LON,
+            "distance": RADIUS_KM,
+            "min_price": MIN_PRICE,
+            "max_price": MAX_PRICE,
+            "ad_type": "OFFER",
+            "page": 0,
+            "size": 100,
         }
 
         try:
-            result = api("/search", params)
+            response = api("/search", params)
+            ads = get_ads(response)
 
-            data = result.get("data", {})
-            ads = data.get("ads", [])
-
-            print(f"  API-Treffer: {len(ads)}")
+            print(f"  API hat {len(ads)} Inserate zurückgegeben.")
 
             for ad in ads:
-                ad_id = (
+                ad_id = str(
                     ad.get("ad_id")
                     or ad.get("ad_url")
+                    or ""
                 )
 
                 if ad_id:
-                    unique[str(ad_id)] = ad
+                    unique[ad_id] = ad
 
-        except Exception as error:
-            message = f"{query}: {error}"
-            errors.append(message)
-            print(f"  FEHLER: {message}")
+        except Exception as exc:
+            errors.append(f"{query}: {exc}")
+            print(f"  Fehler bei {query}: {exc}")
 
     if not unique and errors:
         raise RuntimeError(
-            "Keine Suche erfolgreich. API-Antworten: "
+            "Keine Suche erfolgreich. API-Fehler: "
             + " | ".join(errors)
         )
 
-    ads = []
+    candidates = []
 
     for ad in unique.values():
         price = price_of(ad)
@@ -350,157 +279,129 @@ def main():
         if not carish(ad):
             continue
 
-        ads.append(ad)
+        candidates.append(ad)
 
-    print(f"Erkannte Fahrzeuge: {len(ads)}")
-
-    # Vergleichsangebote nach grobem Modell-Schlüssel gruppieren
+    # Vergleichsgruppen anhand einfacher Modellbegriffe.
     groups = {}
 
-    for ad in ads:
-        title = str(ad.get("title", ""))
-        price = price_of(ad)
-        key = key_for(title)
-
-        groups.setdefault(key, []).append(price)
+    for ad in candidates:
+        key = model_key(str(ad.get("title", "")))
+        groups.setdefault(key, []).append(price_of(ad))
 
     scored = []
 
-    for ad in ads:
+    for ad in candidates:
         price = price_of(ad)
-        title = str(ad.get("title", "Fahrzeugangebot"))
-        key = key_for(title)
+        key = model_key(str(ad.get("title", "")))
 
-        comparisons = [
-            value
-            for value in groups.get(key, [])
-            if price * 0.65 <= value <= price * 2.5
-            and abs(value - price) > 100
+        comparable = [
+            other_price
+            for other_price in groups.get(key, [])
+            if price * 0.65 <= other_price <= price * 2.5
+            and abs(other_price - price) > 100
         ]
 
-        if len(comparisons) >= 2:
-            comparisons.sort()
-            market_value = comparisons[len(comparisons) // 2]
+        reserve = repair_reserve(ad, price)
+        extra_costs = max(250, price * 0.08)
 
-            repair_reserve = reserve(ad, price)
-            additional_costs = max(250, price * 0.08)
+        if len(comparable) >= 2:
+            comparable.sort()
+            market = comparable[len(comparable) // 2]
 
-            estimated_profit = round(
-                market_value
-                - price
-                - repair_reserve
-                - additional_costs
+            profit = round(
+                market - price - reserve - extra_costs
             )
 
             note = (
-                f"{len(comparisons)} grobe Vergleichsangebote. "
-                "Modell, Baujahr und Laufleistung nicht vollständig "
-                "abgeglichen."
+                f"{len(comparable)} ähnliche Treffer. "
+                "Modell, Baujahr und Kilometerstand nicht vollständig abgeglichen."
             )
-
         else:
-            market_value = price
-            repair_reserve = reserve(ad, price)
-            additional_costs = max(250, price * 0.08)
-
-            estimated_profit = -9999
+            market = None
+            profit = None
 
             note = (
-                "Zu wenige Vergleichsangebote. "
-                "Kein belastbarer Gewinn ermittelbar."
+                "Zu wenige vergleichbare Angebote. "
+                "Ein belastbarer Marktwert ist nicht ermittelbar."
             )
 
         location = ad.get("location") or {}
 
-        scored.append({
-            "id": str(ad.get("ad_id", "")),
-            "title": title,
-            "price": round(price),
-            "estimated_market_value": round(market_value),
-            "cost_reserve": round(
-                repair_reserve + additional_costs
-            ),
-            "estimated_profit": estimated_profit,
-            "target_profit_reached": (
-                estimated_profit >= MIN_TARGET_PROFIT
-            ),
-            "estimation_note": note,
-            "location": (
+        if isinstance(location, dict):
+            location_name = (
                 location.get("name")
                 or location.get("city")
                 or "Kassel-Umkreis"
+            )
+        else:
+            location_name = str(location)
+
+        scored.append({
+            "id": str(ad.get("ad_id") or ""),
+            "title": str(ad.get("title") or "Fahrzeugangebot"),
+            "price": round(price),
+            "estimated_market_value": (
+                round(market) if market is not None else None
             ),
+            "cost_reserve": round(reserve + extra_costs),
+            "estimated_profit": profit,
+            "estimation_note": note,
+            "location": location_name,
             "created_at": ad.get("created_at"),
             "url": ad.get("ad_url") or "",
         })
 
-    # Attraktivste Angebote zuerst
     scored.sort(
         key=lambda item: (
-            item["estimated_profit"] < MIN_TARGET_PROFIT,
-            -item["estimated_profit"],
+            item["estimated_profit"] is None,
+            -(item["estimated_profit"] or -99999),
             item["price"],
         )
     )
 
-    result_file = {
+    result = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "location": "Kassel",
-        "latitude": LATITUDE,
-        "longitude": LONGITUDE,
-        "distance_km": int(DISTANCE_KM),
+        "radius_km": RADIUS_KM,
+        "min_price": MIN_PRICE,
+        "max_price": MAX_PRICE,
         "searches_run": len(queries),
-        "total_unique_ads": len(unique),
-        "vehicles_evaluated": len(scored),
-        "minimum_target_profit": MIN_TARGET_PROFIT,
+        "ads_found": len(unique),
+        "cars_evaluated": len(scored),
         "ads": scored,
-        "note": (
-            "Gewinnschätzungen sind unverbindlich. "
-            "Vergleichspreise sind keine garantierten Verkaufspreise. "
-            "Steuern und laufende Fixkosten sind nicht enthalten."
-        ),
         "errors": errors,
+        "note": (
+            "Gewinnschätzungen sind unverbindliche Vorabschätzungen. "
+            "Vor dem Kauf Fahrzeug, Marktwert und Reparaturkosten prüfen."
+        ),
     }
 
-    write(OUT, result_file)
-
-    state = read(STATE, {})
-    state.update({
-        "latitude": LATITUDE,
-        "longitude": LONGITUDE,
-        "distance_km": int(DISTANCE_KM),
-    })
+    write(OUT, result)
     write(STATE, state)
 
-    attractive = [
-        ad for ad in scored
-        if ad["estimated_profit"] >= MIN_TARGET_PROFIT
-    ]
-
     print("")
-    print("========== ERGEBNIS ==========")
+    print("SUCHLAUF ABGESCHLOSSEN")
     print(f"Einmalige Inserate: {len(unique)}")
     print(f"Ausgewertete Fahrzeuge: {len(scored)}")
-    print(f"Angebote mit Zielgewinn >= 800 EUR: {len(attractive)}")
     print(f"Ergebnisdatei: {OUT}")
 
+    profitable = [
+        ad for ad in scored
+        if ad["estimated_profit"] is not None
+        and ad["estimated_profit"] >= 800
+    ]
+
+    print(f"Angebote mit geschätztem Gewinn ab 800 Euro: {len(profitable)}")
+
     if errors:
-        print("")
-        print("Einzelne Suchfehler:")
+        print("Einige Suchabfragen hatten Fehler:")
         for error in errors:
-            print(" - " + error)
-
-    print("==============================")
-
-    if not scored and errors:
-        raise RuntimeError(
-            "Es konnten keine Fahrzeuge ausgewertet werden."
-        )
+            print(" -", error)
 
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as error:
-        print(f"FEHLER: {error}", file=sys.stderr)
+    except Exception as exc:
+        print(f"FEHLER: {exc}", file=sys.stderr)
         sys.exit(1)
