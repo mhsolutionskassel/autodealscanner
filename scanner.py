@@ -63,8 +63,17 @@ def main():
  if not KEY:raise RuntimeError('KLAZ_API_KEY ist nicht gesetzt. GitHub → Settings → Secrets and variables → Actions → New repository secret.')
  state=read(STATE,{ });loc=state.get('location_id');cat=state.get('category_id');discovery=0
  if not loc:
-  loc=location_id(api('/locations',{'q':'Kassel','limit':20}));discovery+=1
-  if not loc:raise RuntimeError('Standort-ID für Kassel nicht automatisch erkannt. Siehe README.md.')
+    location_response = api('/locations', {'q': 'Kassel', 'limit': 20})
+    discovery += 1
+    loc = location_id(location_response)
+
+    if not loc:
+        print("DEBUG: Antwort der Standort-API:")
+        print(json.dumps(location_response, ensure_ascii=False, indent=2)[:5000])
+        raise RuntimeError(
+            "Standort-ID für Kassel nicht erkannt. "
+            "Die API-Antwort steht im Protokoll."
+        )
  if not cat:
   cat=category_id(api('/categories'));discovery+=1
   if not cat:raise RuntimeError('Auto-Kategorie-ID nicht automatisch erkannt. Siehe README.md.')
