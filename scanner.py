@@ -66,7 +66,6 @@ def main():
     location_response = api('/locations', {'q': 'Kassel', 'limit': 20})
     discovery += 1
     loc = location_id(location_response)
-
     if not loc:
         print("DEBUG: Antwort der Standort-API:")
         print(json.dumps(location_response, ensure_ascii=False, indent=2)[:5000])
