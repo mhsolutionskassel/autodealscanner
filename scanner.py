@@ -28,12 +28,46 @@ def walk(o):
   for v in o.values():yield from walk(v)
  elif isinstance(o,list):
   for v in o:yield from walk(v)
+
+
 def location_id(payload):
- found=[]
- for x in walk(payload):
-  name=str(x.get('name','')).lower().strip(); ident=x.get('location_id',x.get('id'))
-  if ident is not None and (name=='kassel' or str(x.get('city','')).lower()=='kassel'):found.append((0 if name=='kassel' else 1,str(ident)))
- return sorted(found)[0][1] if found else None
+    candidates = []
+
+    for item in walk(payload):
+        if not isinstance(item, dict):
+            continue
+
+        name = str(item.get("name", "")).strip().lower()
+        city = str(item.get("city", "")).strip().lower()
+        label = str(item.get("label", "")).strip().lower()
+
+        identifier = (
+            item.get("location_id")
+            or item.get("id")
+        )
+
+        matches = (
+            name == "kassel"
+            or city == "kassel"
+            or label == "kassel"
+            or name.startswith("kassel,")
+            or city.startswith("kassel,")
+            or label.startswith("kassel,")
+        )
+
+        if identifier is not None and matches:
+            candidates.append(
+                (0 if name == "kassel" or city == "kassel" else 1,
+                 str(identifier))
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
 def category_id(payload):
  found=[]
  for x in walk(payload):
