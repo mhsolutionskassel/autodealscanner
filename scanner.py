@@ -1,11 +1,14 @@
 import json
 import os
+import re
 import sys
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+# Kleinanzeigen-Agent API: keine kostenpflichtigen Ähnlichkeitsabfragen
 BASE = "https://api.kleinanzeigen-agent.de/api/v2/kleinanzeigen"
 KEY = os.environ.get("KLAZ_API_KEY", "").strip()
 
@@ -18,12 +21,6 @@ MIN_PRICE = 100
 MAX_PRICE = 7000
 MIN_TARGET_PROFIT = 800
 
-# Wie viele Fahrzeuge pro Durchlauf mit ähnlichen Inseraten
-# verglichen werden. Jede Ähnlichkeitssuche kostet laut API-Doku 1 Credit.
-MAX_SIMILAR_LOOKUPS = max(
-    0, int(os.environ.get("MAX_SIMILAR_LOOKUPS", "30"))
-)
-
 SEARCH_TERMS = ("Auto", "Gebrauchtwagen", "PKW")
 
 MAKES = (
@@ -32,81 +29,88 @@ MAKES = (
     "citroën", "dacia", "volvo", "fiat", "toyota", "hyundai",
     "kia", "mazda", "honda", "nissan", "suzuki", "mini",
     "mitsubishi", "subaru", "chevrolet", "alfa romeo", "smart",
-    "porsche"
+    "porsche", "saab", "jaguar", "land rover", "jeep", "daihatsu",
+    "chrysler", "tesla", "lada", "lancia", "mg", "lexus"
 )
 
 MODEL_TERMS = (
-    "golf", "polo", "passat", "corsa", "astra", "focus", "fiesta",
-    "clio", "megane", "twingo", "octavia", "fabia", "leon",
-    "ibiza", "a1", "a3", "a4", "3er", "5er", "1er",
-    "touran", "tiguan", "zafira", "meriva", "yaris", "corolla",
-    "ceed", "cabrio", "limousine", "kombilimousine", "komb i"
+    "golf", "polo", "passat", "jetta", "lupo", "fox", "touran",
+    "tiguan", "caddy", "corsa", "astra", "insignia", "vectra",
+    "focus", "fiesta", "mondeo", "ka", "clio", "megane", "twingo",
+    "laguna", "modus", "octavia", "fabia", "superb", "leon", "ibiza",
+    "a1", "a2", "a3", "a4", "a5", "a6", "a8", "3er", "5er", "1er",
+    "x1", "x3", "x5", "c klasse", "e klasse", "a klasse", "b klasse",
+    "c180", "c200", "e200", "e220", "yaris", "corolla", "avensis",
+    "auris", "ceed", "rio", "i10", "i20", "i30", "mazda 2", "mazda 3",
+    "civic", "jazz", "micra", "qashqai", "swift", "ignis", "mini",
+    "fortwo", "forfour", "c1", "c2", "c3", "c4", "107", "206", "207",
+    "208", "306", "307", "308", "106", "fiat 500", "panda", "punto",
+    "multipla", "v40", "v50", "v70", "s40", "s60", "xc90",
+    "zafira", "meriva", "mokka", "captur", "logan", "sandero"
 )
 
 EXCLUDE_WORDS = (
     "autoanhänger", "anhaenger", "anhänger", "felge", "reifen",
-    "motoröl", "motoröl", "ersatzteil", "scheinwerfer",
-    "getriebeöl", "suche auto", "schlachtfest", "nur teile",
-    "autoteile", "teileträger"
+    "motoröl", "ersatzteil", "scheinwerfer", "getriebeöl",
+    "suche auto", "schlachtfest", "nur teile", "autoteile",
+    "teileträger", "auto gesucht", "kaufgesuch"
+)
+
+MAJOR_DEFECTS = (
+    "motorschaden", "getriebeschaden", "unfallwagen",
+    "bastlerfahrzeug", "bastlerauto", "nicht fahrbereit",
+    "springt nicht an", "kupplung defekt", "zylinderkopfschaden",
+    "rahmenschaden", "wasserschaden"
+)
+
+MODERATE_DEFECTS = (
+    "tüv abgelaufen", "tuev abgelaufen", "rost", "klima defekt",
+    "reparatur", "defekt", "ölverlust", "oelverlust",
+    "motorkontrollleuchte", "leuchtet", "unfall", "getriebe ruckelt"
 )
 
 
 def read_json(path, default):
     try:
-        with open(path, encoding="utf-8") as file:
-            return json.load(file)
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
     except (OSError, json.JSONDecodeError):
         return default
 
 
 def write_json(path, data):
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
-    with open(path, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def api(path, params=None):
     if not KEY:
         raise RuntimeError(
-            "KLAZ_API_KEY fehlt. Bitte GitHub → Settings → "
-            "Secrets and variables → Actions prüfen."
+            "KLAZ_API_KEY fehlt. GitHub → Settings → Secrets and variables → Actions prüfen."
         )
 
     url = BASE + path
     if params:
         url += "?" + urlencode(params)
 
-    request = Request(
-        url,
-        headers={
-            "klaz_key": KEY,
-            "Accept": "application/json",
-            "User-Agent": "AutoDealScanner/2.0"
-        }
-    )
+    req = Request(url, headers={
+        "klaz_key": KEY,
+        "Accept": "application/json",
+        "User-Agent": "AutoDealScanner/3.0"
+    })
 
     try:
-        with urlopen(request, timeout=45) as response:
+        with urlopen(req, timeout=45) as response:
             payload = json.loads(response.read().decode("utf-8"))
-
     except HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(
-            f"API HTTP {exc.code}: {body}"
-        ) from exc
-
+        body = exc.read().decode("utf-8", "replace")[:700]
+        raise RuntimeError(f"API HTTP {exc.code}: {body}") from exc
     except URLError as exc:
-        raise RuntimeError(
-            f"API-Verbindung fehlgeschlagen: {exc}"
-        ) from exc
+        raise RuntimeError(f"API-Verbindung fehlgeschlagen: {exc}") from exc
 
     if isinstance(payload, dict) and payload.get("success") is False:
-        raise RuntimeError(
-            payload.get("message", "API-Anfrage fehlgeschlagen")
-        )
+        raise RuntimeError(payload.get("message", "API-Anfrage fehlgeschlagen"))
 
     return payload
 
@@ -116,57 +120,36 @@ def walk(obj):
         yield obj
         for value in obj.values():
             yield from walk(value)
-
     elif isinstance(obj, list):
         for value in obj:
             yield from walk(value)
 
 
-def find_location_id(payload):
+def find_id(payload, accepted_names, field_names):
     matches = []
 
     for item in walk(payload):
         if not isinstance(item, dict):
             continue
 
-        name = str(item.get("name", "")).strip().lower()
-        city = str(item.get("city", "")).strip().lower()
-        label = str(item.get("label", "")).strip().lower()
+        name = " ".join(
+            str(item.get(k, "")) for k in ("name", "city", "label")
+        ).strip().lower()
 
-        ident = item.get("location_id", item.get("id"))
+        ident = next(
+            (item.get(field) for field in field_names if item.get(field) is not None),
+            None
+        )
+
         if ident is None:
             continue
 
-        if name == "kassel" or city == "kassel" or label == "kassel":
+        if any(name == n for n in accepted_names):
             matches.append((0, str(ident)))
-
-        elif (
-            name.startswith("kassel")
-            or city.startswith("kassel")
-            or label.startswith("kassel")
-        ):
+        elif any(name.startswith(n) for n in accepted_names):
             matches.append((1, str(ident)))
 
     return sorted(matches)[0][1] if matches else None
-
-
-def find_car_category_id(payload):
-    found = []
-
-    for item in walk(payload):
-        if not isinstance(item, dict):
-            continue
-
-        name = str(item.get("name", "")).strip().lower()
-        ident = item.get("category_id", item.get("id"))
-
-        if ident is not None and name in (
-            "autos", "pkw", "autos & motorräder"
-        ):
-            priority = 0 if name == "autos" else 1
-            found.append((priority, str(ident)))
-
-    return sorted(found)[0][1] if found else None
 
 
 def extract_ads(payload):
@@ -180,6 +163,9 @@ def extract_ads(payload):
 
     if isinstance(payload.get("ads"), list):
         return payload["ads"]
+
+    if isinstance(data, list):
+        return data
 
     return []
 
@@ -206,174 +192,213 @@ def ad_url_of(ad):
 
 def seller_type_of(ad):
     seller = ad.get("seller") or {}
+    value = None
 
     if isinstance(seller, dict):
-        seller_type = seller.get("type") or seller.get("account_type")
-    else:
-        seller_type = None
+        value = (
+            seller.get("type")
+            or seller.get("account_type")
+            or seller.get("seller_type")
+        )
 
-    seller_type = (
-        seller_type
-        or ad.get("poster_type")
-        or ad.get("seller_type")
-        or ""
-    )
-
-    return str(seller_type).strip().upper()
+    return str(
+        value or ad.get("poster_type") or ad.get("seller_type") or ""
+    ).strip().upper()
 
 
 def is_private(ad):
-    # Nur eindeutig als privat gekennzeichnete Inserate akzeptieren.
-    return seller_type_of(ad) == "PRIVATE"
+    # Unbekannte Verkäuferarten werden nicht automatisch als privat gewertet.
+    return seller_type_of(ad) in ("PRIVATE", "PRIVATE_SELLER", "PRIVAT")
+
+
+def ad_text(ad):
+    return (
+        str(ad.get("title") or "")
+        + " "
+        + str(ad.get("description") or "")
+    ).lower()
 
 
 def is_car(ad):
-    title = str(ad.get("title") or "").lower()
-    description = str(ad.get("description") or "").lower()
-    text = title + " " + description
+    text = ad_text(ad)
 
     if any(word in text for word in EXCLUDE_WORDS):
         return False
 
-    return any(make in text for make in MAKES) or any(
-        model in text for model in MODEL_TERMS
-    ) or any(word in text for word in (
-        "gebrauchtwagen", "pkw", "kleinwagen", "fahrzeug"
-    ))
+    has_make = any(
+        re.search(r"(?<![a-z])" + re.escape(make) + r"(?![a-z])", text)
+        for make in MAKES
+    )
+
+    has_model = any(model in text for model in MODEL_TERMS)
+
+    return has_make or has_model or any(
+        word in text for word in ("gebrauchtwagen", "pkw", "kleinwagen", "fahrzeug")
+    )
 
 
 def location_text(ad):
     loc = ad.get("location") or {}
 
     if isinstance(loc, dict):
-        return str(
-            loc.get("city")
-            or loc.get("name")
-            or LOCATION_NAME
-        )
+        return str(loc.get("city") or loc.get("name") or LOCATION_NAME)
 
     return str(loc or LOCATION_NAME)
 
 
+def normalize(text):
+    text = str(text or "").lower().replace("-", " ").replace("/", " ")
+    text = re.sub(r"[^a-z0-9äöüß ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def model_key(ad):
+    title = normalize(ad.get("title"))
+
+    make = next(
+        (
+            m for m in sorted(MAKES, key=len, reverse=True)
+            if re.search(r"(?<![a-z])" + re.escape(m) + r"(?![a-z])", title)
+        ),
+        None
+    )
+
+    model = next(
+        (
+            m for m in sorted(MODEL_TERMS, key=len, reverse=True)
+            if re.search(r"(?<![a-z0-9])" + re.escape(m) + r"(?![a-z0-9])", title)
+        ),
+        None
+    )
+
+    if make and model:
+        make_norm = "vw" if make == "volkswagen" else (
+            "mercedes" if make == "benz" else make
+        )
+        return f"{make_norm} {model}"
+
+    if model:
+        return model
+
+    return ""
+
+
 def reserve_for(ad, price):
-    text = (
-        str(ad.get("title") or "")
-        + " "
-        + str(ad.get("description") or "")
-    ).lower()
+    text = ad_text(ad)
 
-    major_defects = (
-        "motorschaden", "getriebeschaden", "unfallwagen",
-        "bastlerfahrzeug", "nicht fahrbereit",
-        "springt nicht an", "kupplung defekt"
-    )
-
-    moderate_defects = (
-        "tüv abgelaufen", "tuev abgelaufen", "rost",
-        "klima defekt", "kratzer", "delle", "reparatur",
-        "defekt", "ölverlust", "oelverlust", "leuchtet"
-    )
-
-    if any(word in text for word in major_defects):
+    if any(word in text for word in MAJOR_DEFECTS):
         return max(1500, price * 0.35)
 
-    if any(word in text for word in moderate_defects):
+    if any(word in text for word in MODERATE_DEFECTS):
         return max(900, price * 0.18)
 
     return max(600, price * 0.10)
 
 
-def model_key(ad):
-    """
-    Einfache Vergleichsgruppe aus dem Inseratstitel.
-    Das ersetzt keinen Abgleich von Baujahr, Motor oder Laufleistung.
-    """
-    title = str(ad.get("title") or "").lower()
+def evaluate(candidates):
+    # Verglichen werden nur Suchtreffer, die bereits vorliegen.
+    groups = {}
 
-    tokens = []
-    for token in title.replace("-", " ").replace("/", " ").split():
-        cleaned = "".join(char for char in token if char.isalnum())
-        if cleaned:
-            tokens.append(cleaned)
+    for ad in candidates:
+        key = model_key(ad)
+        price = price_of(ad)
 
-    make = next((m for m in MAKES if m in title), None)
-    model = next((m for m in MODEL_TERMS if m in title), None)
+        if key and price is not None:
+            groups.setdefault(key, []).append(price)
 
-    if make and model:
-        return f"{make} {model}"
+    results = []
 
-    if model:
-        return model
+    for ad in candidates:
+        price = price_of(ad)
+        key = model_key(ad)
 
-    if make:
-        return make
+        peer_prices = [
+            p for p in groups.get(key, [])
+            if p != price and 100 <= p <= 50000
+        ]
 
-    return " ".join(tokens[:2])
+        peer_prices = [
+            p for p in peer_prices
+            if price * 0.55 <= p <= price * 2.5
+        ]
+        peer_prices.sort()
 
-
-def estimate_from_similar(ad, similar_ads):
-    own_id = ad_id_of(ad)
-    own_price = price_of(ad)
-    own_key = model_key(ad)
-
-    prices = []
-
-    for other in similar_ads:
-        if not isinstance(other, dict):
-            continue
-
-        if ad_id_of(other) == own_id:
-            continue
-
-        # Vergleichswerte ebenfalls auf private Inserate begrenzen.
-        if not is_private(other):
-            continue
-
-        price = price_of(other)
-        if price is None or not 100 <= price <= 50000:
-            continue
-
-        # Verhindert extrem weit entfernte Preisvergleiche.
-        if own_price and not own_price * 0.55 <= price <= own_price * 2.5:
-            continue
-
-        other_key = model_key(other)
-
-        # Wenn sich für beide Inserate eine Modellgruppe bestimmen lässt,
-        # werden abweichende Gruppen nicht als Vergleich verwendet.
-        if own_key != " " and other_key != " ":
-            if own_key and other_key and own_key != other_key:
-                continue
-
-        prices.append(price)
-
-    prices.sort()
-
-    if len(prices) < 3:
-        return None, len(prices), (
-            "Zu wenige passende private Vergleichsangebote "
-            "(mindestens 3 erforderlich)."
+        market = None
+        note = (
+            "Nicht ausreichend viele vergleichbare private Suchtreffer "
+            "für eine Marktwertschätzung."
         )
 
-    middle = len(prices) // 2
+        if key and len(peer_prices) >= 3:
+            n = len(peer_prices)
 
-    if len(prices) % 2:
-        market = prices[middle]
-    else:
-        market = (prices[middle - 1] + prices[middle]) / 2
+            if n % 2:
+                market = round(peer_prices[n // 2])
+            else:
+                market = round(
+                    (peer_prices[n // 2 - 1] + peer_prices[n // 2]) / 2
+                )
 
-    return round(market), len(prices), (
-        f"Median aus {len(prices)} ähnlichen privaten Inseraten. "
-        "Baujahr, Kilometerstand, Motorisierung und Zustand "
-        "vor dem Kauf unbedingt vergleichen."
-    )
+            note = (
+                f"Median aus {n} anderen privaten Suchtreffern mit Modell-Schlüssel "
+                f"„{key}“. Baujahr, Laufleistung, Motor und Zustand werden nicht exakt "
+                "abgeglichen."
+            )
+
+        repair_reserve = round(reserve_for(ad, price))
+        other_costs = round(max(250, price * 0.08))
+        total_costs = repair_reserve + other_costs
+
+        profit = (
+            round(market - price - total_costs)
+            if market is not None
+            else None
+        )
+
+        if profit is not None and profit >= MIN_TARGET_PROFIT:
+            status = "MANUELL PRÜFEN – möglicher Treffer"
+        elif profit is not None and profit >= 0:
+            status = "Möglicher kleiner Gewinn"
+        elif profit is not None:
+            status = "Kein rechnerischer Gewinn"
+        else:
+            status = "NICHT AUSREICHEND BEWERTBAR"
+
+        results.append({
+            "id": ad_id_of(ad),
+            "title": str(ad.get("title") or "Fahrzeugangebot"),
+            "price": round(price),
+            "estimated_market_value": market,
+            "cost_reserve": total_costs,
+            "estimated_profit": profit,
+            "profit_target": MIN_TARGET_PROFIT,
+            "status": status,
+            "seller_type": seller_type_of(ad),
+            "comparable_ads": len(peer_prices),
+            "model_key": key or None,
+            "estimation_note": note,
+            "location": location_text(ad),
+            "created_at": ad.get("created_at"),
+            "url": ad_url_of(ad)
+        })
+
+    results.sort(key=lambda item: (
+        item["estimated_profit"] is None,
+        -(
+            item["estimated_profit"]
+            if item["estimated_profit"] is not None
+            else -999999
+        ),
+        item["price"]
+    ))
+
+    return results
 
 
 def main():
     if not KEY:
         raise RuntimeError(
-            "KLAZ_API_KEY ist nicht gesetzt. GitHub → Settings → "
-            "Secrets and variables → Actions prüfen."
+            "KLAZ_API_KEY ist nicht gesetzt. GitHub → Settings → Secrets and variables → Actions prüfen."
         )
 
     state = read_json(STATE, {})
@@ -381,26 +406,25 @@ def main():
     category_id = state.get("category_id")
 
     if not location_id:
-        location_payload = api(
-            "/locations",
-            {"q": LOCATION_NAME, "limit": 100}
-        )
-        location_id = find_location_id(location_payload)
+        payload = api("/locations", {"q": LOCATION_NAME, "limit": 100})
+        location_id = find_id(payload, {"kassel"}, ("location_id", "id"))
 
         if not location_id:
             raise RuntimeError(
-                "Kassel wurde in der Standortantwort nicht gefunden. "
-                "Es wird kein anderer Ort verwendet."
+                "Kassel wurde in der Standortantwort nicht gefunden; "
+                "es wird kein anderer Ort verwendet."
             )
 
     if not category_id:
-        category_payload = api("/categories")
-        category_id = find_car_category_id(category_payload)
+        payload = api("/categories")
+        category_id = find_id(
+            payload,
+            {"autos", "pkw", "autos & motorräder"},
+            ("category_id", "id")
+        )
 
         if not category_id:
-            raise RuntimeError(
-                "Auto-Kategorie-ID konnte nicht ermittelt werden."
-            )
+            raise RuntimeError("Auto-Kategorie-ID konnte nicht ermittelt werden.")
 
     state.update({
         "location_id": str(location_id),
@@ -431,21 +455,22 @@ def main():
                 if not isinstance(ad, dict):
                     continue
 
-                # Doppelte Anzeigen zusammenführen.
                 ident = ad_id_of(ad) or ad_url_of(ad)
+
                 if ident:
                     unique[ident] = ad
+
+            # Kleine Pause zur Verringerung unnötiger Anfrage-Spitzen.
+            time.sleep(2)
 
         except Exception as exc:
             search_errors.append(f"{query}: {exc}")
 
     if not unique and search_errors:
         raise RuntimeError(
-            "Alle Suchanfragen fehlgeschlagen: "
-            + " | ".join(search_errors)
+            "Alle Suchanfragen fehlgeschlagen: " + " | ".join(search_errors)
         )
 
-    # Sicherheitsfilter: Auch nach der API-Suche ausschließlich privat.
     candidates = [
         ad for ad in unique.values()
         if is_private(ad)
@@ -454,102 +479,17 @@ def main():
         and is_car(ad)
     ]
 
-    candidates.sort(
-        key=lambda ad: (
-            str(ad.get("created_at") or "9999"),
-            price_of(ad) or 999999
-        )
-    )
-
-    similar_results = {}
-    similar_errors = {}
-
-    for ad in candidates[:MAX_SIMILAR_LOOKUPS]:
-        ident = ad_id_of(ad)
-
-        if not ident:
-            continue
-
-        try:
-            response = api(
-                f"/ads/{ident}/similar",
-                {"size": "10"}
-            )
-            similar_results[ident] = extract_ads(response)
-
-        except Exception as exc:
-            similar_errors[ident] = str(exc)
-
-    scored = []
-
-    for ad in candidates:
-        ident = ad_id_of(ad)
-        price = price_of(ad)
-
-        market, comp_count, note = estimate_from_similar(
-            ad,
-            similar_results.get(ident, [])
-        )
-
-        # Rücklage für Reparatur/Aufbereitung plus weitere Nebenkosten.
-        repair_reserve = reserve_for(ad, price)
-        other_costs = max(250, price * 0.08)
-        cost_reserve = round(repair_reserve + other_costs)
-
-        if market is not None:
-            profit = round(market - price - cost_reserve)
-
-            if profit >= MIN_TARGET_PROFIT:
-                status = "PRÜFEN – mögliches Angebot"
-            elif profit >= 0:
-                status = "Möglicher kleiner Gewinn"
-            else:
-                status = "Kein rechnerischer Gewinn"
-
-        else:
-            profit = None
-            status = "NICHT AUSREICHEND BEWERTBAR"
-
-            if ident in similar_errors:
-                note = (
-                    "Ähnlichkeitssuche fehlgeschlagen: "
-                    + similar_errors[ident]
-                )
-            elif ident not in similar_results:
-                note = (
-                    "Für dieses Fahrzeug wurde keine Ähnlichkeitssuche "
-                    f"ausgeführt (Limit: {MAX_SIMILAR_LOOKUPS})."
-                )
-
-        scored.append({
-            "id": ident,
-            "title": str(ad.get("title") or "Fahrzeugangebot"),
-            "price": round(price),
-            "estimated_market_value": market,
-            "cost_reserve": cost_reserve,
-            "estimated_profit": profit,
-            "profit_target": MIN_TARGET_PROFIT,
-            "status": status,
-            "seller_type": seller_type_of(ad),
-            "comparable_ads": comp_count,
-            "estimation_note": note,
-            "location": location_text(ad),
-            "created_at": ad.get("created_at"),
-            "url": ad_url_of(ad)
-        })
-
-    # Höchster geschätzter Gewinn zuerst.
-    # Angebote ohne ausreichende Vergleichsdaten kommen ans Ende.
-    scored.sort(key=lambda item: (
-        item["estimated_profit"] is None,
-        -(item["estimated_profit"] or -999999),
-        item["price"]
-    ))
+    scored = evaluate(candidates)
 
     profitable = sum(
         1 for item in scored
-        if item.get("estimated_profit") is not None
+        if item["estimated_profit"] is not None
         and item["estimated_profit"] >= MIN_TARGET_PROFIT
+    )
+
+    comparable = sum(
+        1 for item in scored
+        if item["estimated_market_value"] is not None
     )
 
     result = {
@@ -562,18 +502,18 @@ def main():
         "searches_run": len(SEARCH_TERMS),
         "ads_found": len(unique),
         "cars_evaluated": len(candidates),
-        "similar_checks_run": len(similar_results),
-        "similar_checks_limit": MAX_SIMILAR_LOOKUPS,
+        "similar_checks_run": 0,
+        "similar_checks_limit": 0,
         "min_target_profit": MIN_TARGET_PROFIT,
         "profitable_offers": profitable,
+        "market_values_estimated": comparable,
         "ads": scored,
         "errors": search_errors,
         "note": (
-            "Marktwerte sind unverbindliche Schätzungen aus ähnlichen "
-            "privaten Live-Inseraten. Die Ähnlichkeitssuche liefert "
-            "höchstens 10 Treffer. Baujahr, Kilometerstand, Motorisierung "
-            "und Zustand werden nicht zwingend exakt abgeglichen. "
-            "Kosten und Gewinn müssen vor einem Kauf selbst geprüft werden."
+            "Es werden keine Ähnlichkeits-API-Aufrufe ausgeführt. Marktwerte sind grobe "
+            "Mediane aus bereits gefundenen privaten Inseraten mit ähnlichem Modellnamen. "
+            "Baujahr, Kilometerstand, Motorisierung, TÜV und Zustand werden nicht zuverlässig "
+            "abgeglichen. Kosten und Gewinn müssen vor dem Kauf manuell geprüft werden."
         )
     }
 
@@ -581,10 +521,10 @@ def main():
     write_json(STATE, state)
 
     print(
-        f"Fertig: {len(candidates)} private Fahrzeuge; "
-        f"{len(similar_results)} Ähnlichkeitsabfragen; "
-        f"{profitable} Angebote mit geschätztem Gewinn >= "
-        f"{MIN_TARGET_PROFIT} EUR."
+        f"Fertig: {len(unique)} Anzeigen gefunden; "
+        f"{len(candidates)} private Fahrzeuge ausgewertet; "
+        f"{comparable} mit grobem Vergleichswert; "
+        f"{profitable} mögliche Treffer mit Gewinn >= {MIN_TARGET_PROFIT} EUR."
     )
 
     if search_errors:
